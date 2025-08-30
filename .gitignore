@@ -2,3 +2,5 @@ venv/
 /improvement.txt
 /*.py
 /requirements.txt
+vectorstore/
+uploads/
