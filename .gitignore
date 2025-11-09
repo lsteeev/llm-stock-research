@@ -9,15 +9,16 @@ __pycache__/
 # Virtual environment
 venv/
 
-# Git
-.gitignore
-
 # Output (generated reports)
-output/
+output/*
+!output/.gitkeep
 
 # Data (large or generated)
-data/annual_reports/
-data/vectorstores/
+data/annual_reports/*
+!data/annual_reports/.gitkeep
+
+data/vectorstores/*
+!data/vectorstores/.gitkeep
 
 # Temporary or test files
 /*.py
