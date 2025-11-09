@@ -1,19 +1,57 @@
-from langchain.document_loaders import PyMuPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 import fitz
 import os
 from typing import List, Dict, Any, Optional
 
-PDF_PATH = "annual-report-agent/uploads/reports/Abbvie_2024.pdf"
+PDF_DIR = "data/annual_reports"
 MODEL_NAME = "all-MiniLM-L6-v2"
-CHUNK_SIZE = 2000
-CHUNK_OVERLAP = 400
-VECTORSTORE_DIR = "annual-report-agent/vectorstore/faiss"
+CHUNK_SIZE = 1800
+CHUNK_OVERLAP = 360
+VECTORSTORE_DIR = "data/vectorstores"
 
 
 # ---------- Utilities ----------
+def resolve_pdf_path(name_or_path: str) -> str:
+    """
+    Convert company name to PDF path if needed.
+    Examples:
+      'Victoria_Secret_2024' -> 'data/annual_reports/Victoria_Secret_2024.pdf'
+      'data/annual_reports/Victoria_Secret_2024.pdf' -> 'data/annual_reports/Victoria_Secret_2024.pdf'
+    """
+    # If it's already a valid file path, return it
+    if os.path.isfile(name_or_path):
+        return name_or_path
+    
+    # If it has .pdf extension but doesn't exist, raise error
+    if name_or_path.endswith('.pdf'):
+        if not os.path.isfile(name_or_path):
+            raise FileNotFoundError(f"PDF file not found: {name_or_path}")
+        return name_or_path
+    
+    # Otherwise, treat it as a company name and construct the path
+    pdf_path = os.path.join(PDF_DIR, f"{name_or_path}.pdf")
+    if not os.path.isfile(pdf_path):
+        raise FileNotFoundError(
+            f"PDF file not found: {pdf_path}\n"
+            f"Expected file at: {os.path.abspath(pdf_path)}"
+        )
+    return pdf_path
+
+
+def extract_company_name(name_or_path: str) -> str:
+    """
+    Extract company name from either a file path or company name.
+    Examples:
+      'Victoria_Secret_2024' -> 'Victoria_Secret_2024'
+      'data/annual_reports/Victoria_Secret_2024.pdf' -> 'Victoria_Secret_2024'
+    """
+    base_name = os.path.basename(name_or_path)
+    return os.path.splitext(base_name)[0]
+
+
 def extract_headings(pdf_path: str) -> List[Dict[str, Any]]:
     """Extract likely section headings from a PDF file."""
     try:
@@ -30,7 +68,16 @@ def extract_headings(pdf_path: str) -> List[Dict[str, Any]]:
                     text = span.get("text", "").strip()
                     if not text:
                         continue
-                    if len(text.split()) > 10 or span.get("size", 0) <= 17:
+                    # Skip if too long or too short
+                    if len(text.split()) > 10 or len(text) < 3:
+                        continue
+                    # Skip numbers, symbols, single characters
+                    if text.startswith(('$', '>', '<', '%')) or text.isdigit():
+                        continue
+                    # Skip if mostly non-alphabetic
+                    if sum(c.isalpha() for c in text) / len(text) < 0.5:
+                        continue
+                    if span.get("size", 0) <= 18:
                         continue
                     headings.append({
                         "page": page_num,
@@ -60,28 +107,50 @@ def assign_sections_to_chunks(chunks: List[Any], headings: List[Dict[str, Any]])
     return chunks
 
 
-def save_faiss_index(vectorstore, path: str):
-    vectorstore.save_local(path)
-    print(f"FAISS index saved to {path}")
+def get_vectorstore_path(name_or_path: str) -> str:
+    """Return consistent path for saving/loading FAISS index."""
+    company_name = extract_company_name(name_or_path)
+    return os.path.join(VECTORSTORE_DIR, company_name)
 
 
-def load_faiss_index(path: str, embedding):
-    vectorstore = FAISS.load_local(path, embedding)
-    print(f"FAISS index loaded from {path}")
+def save_faiss_index(vectorstore, name_or_path: str):
+    save_path = get_vectorstore_path(name_or_path)
+    os.makedirs(save_path, exist_ok=True)
+    vectorstore.save_local(save_path)
+    company_name = extract_company_name(name_or_path)
+    print(f"✅ FAISS index saved to {save_path}")
+    print(f"💡 To load this index, use: --load {company_name}")
+
+
+def load_faiss_index(name_or_path: str, embedding):
+    load_path = get_vectorstore_path(name_or_path)
+    if not os.path.exists(load_path):
+        company_name = extract_company_name(name_or_path)
+        raise FileNotFoundError(
+            f"No FAISS index found at {load_path}\n"
+            f"Please build the index first using: --save {company_name}"
+        )
+    vectorstore = FAISS.load_local(load_path, embedding, allow_dangerous_deserialization=True)
+    company_name = extract_company_name(name_or_path)
+    print(f"✅ FAISS index loaded from {load_path} for '{company_name}'")
     return vectorstore
 
 
 # ---------- Core ----------
-def build_vectorstore(pdf_path: str, model_name: str = MODEL_NAME, save: bool = True):
+def build_vectorstore(name_or_path: str, model_name: str = MODEL_NAME, save: bool = True):
     """
     Extract chunks, embed, and build FAISS vectorstore from a PDF.
     Returns the vectorstore object.
     """
-    base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-    save_path = f"annual-report-agent/vectorstore/{base_name}"
+    pdf_path = resolve_pdf_path(name_or_path)
+    company_name = extract_company_name(name_or_path)
+    
+    print(f"📄 Processing PDF: {pdf_path}")
+    print(f"🏢 Company: {company_name}")
 
     # Headings
     headings = extract_headings(pdf_path)
+    print(f"📑 Found {len(headings)} potential section headings")
 
     # Load + split PDF
     loader = PyMuPDFLoader(pdf_path)
@@ -92,51 +161,92 @@ def build_vectorstore(pdf_path: str, model_name: str = MODEL_NAME, save: bool = 
     chunks = splitter.split_documents(docs)
     cleaned_chunks = [clean_metadata(doc) for doc in chunks]
     cleaned_chunks = assign_sections_to_chunks(cleaned_chunks, headings)
+    print(f"✂️  Created {len(cleaned_chunks)} chunks")
 
     # Embedding
+    print(f"🔢 Creating embeddings with {model_name}...")
     embedding = HuggingFaceEmbeddings(model_name=model_name)
     vectorstore = FAISS.from_documents(cleaned_chunks, embedding)
 
     # Save if needed
     if save:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        save_faiss_index(vectorstore, save_path)
+        save_faiss_index(vectorstore, name_or_path)
 
     return vectorstore
 
 
 # ---------- CLI / Debug ----------
-def main(pdf_path: str = PDF_PATH, model_name: str = MODEL_NAME, mode: str = "rebuild"):
+def main(name_or_path: str, model_name: str = MODEL_NAME, mode: str = "rebuild"):
     embedding = HuggingFaceEmbeddings(model_name=model_name)
+    company_name = extract_company_name(name_or_path)
 
     if mode == "load":
-        vectorstore = load_faiss_index(VECTORSTORE_DIR, embedding)
+        vectorstore = load_faiss_index(name_or_path, embedding)
     else:
-        vectorstore = build_vectorstore(pdf_path, model_name, save=(mode == "save"))
+        vectorstore = build_vectorstore(name_or_path, model_name, save=(mode == "save"))
 
     # Quick test query
-    query = "New product"
-    results_with_scores = vectorstore.similarity_search_with_score(query, k=3)
+    test_queries = [
+        "risk factors",
+        "revenue by segment"
+    ]
 
-    print(f"\nRetrieving top 3 chunks for query: '{query}'")
-    for i, (doc, score) in enumerate(results_with_scores, start=1):
-        print(f"\nResult {i}")
-        print("Score:", score)
-        print("Content:", doc.page_content[:200])
-        print("Metadata:", doc.metadata)
+    print(f"\n{'='*60}")
+    print(f"🔍 Testing RAG output for: {company_name}")
+    print('='*60)
+
+    for query in test_queries:
+        print(f"\n{'='*60}")
+        print(f"Query: '{query}'")
+        print('='*60)
+        results = vectorstore.similarity_search_with_score(query, k=2)
+        
+        for i, (doc, score) in enumerate(results, start=1):
+            print(f"\n[Result {i}] Score: {score:.4f}")
+            print(f"Page: {doc.metadata.get('page')}, Section: {doc.metadata.get('section')}")
+            print(f"Content preview: {doc.page_content[:250]}...")
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="PDF chunking, embedding, and FAISS index management.")
-    parser.add_argument("pdf_path", nargs="?", default=PDF_PATH, help="Path to PDF file")
+    parser = argparse.ArgumentParser(
+        description="PDF chunking, embedding, and FAISS index management.",
+        epilog="""
+Examples:
+  # Build and save index using company name
+  python3 app/rag.py Victoria_Secret_2024 --save
+  
+  # Load existing index using company name
+  python3 app/rag.py Victoria_Secret_2024 --load
+  
+  # Build without saving
+  python3 app/rag.py Victoria_Secret_2024
+  
+  # Use full path
+  python3 app/rag.py data/annual_reports/Victoria_Secret_2024.pdf --save
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "name_or_path", 
+        nargs="?", 
+        default="Victoria_Secret_2024",
+        help="Company name (e.g., 'Victoria_Secret_2024') or full PDF path"
+    )
     parser.add_argument("--save", action="store_true", help="Save FAISS index after building")
     parser.add_argument("--load", action="store_true", help="Load FAISS index from disk")
     args = parser.parse_args()
 
-    if args.load:
-        main(pdf_path=args.pdf_path, mode="load")
-    elif args.save:
-        main(pdf_path=args.pdf_path, mode="save")
-    else:
-        main(pdf_path=args.pdf_path, mode="rebuild")
+    try:
+        if args.load:
+            main(name_or_path=args.name_or_path, mode="load")
+        elif args.save:
+            main(name_or_path=args.name_or_path, mode="save")
+        else:
+            main(name_or_path=args.name_or_path, mode="rebuild")
+    except FileNotFoundError as e:
+        print(f"❌ Error: {e}")
+        exit(1)
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        raise

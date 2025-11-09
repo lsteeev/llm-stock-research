@@ -1,6 +1,25 @@
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
 venv/
-/improvement.txt
+
+# Git
+.gitignore
+
+# Output (generated reports)
+output/
+
+# Data (large or generated)
+data/annual_reports/
+data/vectorstores/
+
+# Temporary or test files
 /*.py
-/requirements.txt
-vectorstore/
-uploads/
+/TODO.txt
+/improvement.txt

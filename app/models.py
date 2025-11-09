@@ -15,7 +15,6 @@ class ChatResponse(BaseModel):
 # --- Report Models ---
 class ReportRequest(BaseModel):
     company_name: str = "Company"
-    additional_context: str = ""
 
 class ReportSection(BaseModel):
     title: str
